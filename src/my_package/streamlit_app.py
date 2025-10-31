@@ -4,6 +4,7 @@ from typing import Optional
 
 import streamlit as st
 import openai
+from urllib.parse import urlparse, parse_qs
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,14 +16,35 @@ def configure_openai(provider: str, api_key: Optional[str], endpoint: Optional[s
     For Azure OpenAI we set api_type, api_base and api_version and use the deployment name when calling chat completions.
     """
     if provider == "azure":
-        if not api_key or not endpoint or not deployment:
-            raise ValueError("Azure configuration requires AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_DEPLOYMENT")
+        # Accept either: separate endpoint + deployment fields, or a full endpoint URL that contains the deployment path.
+        if not api_key or not endpoint:
+            raise ValueError("Azure configuration requires AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT")
+
+        # Try to parse deployment from endpoint if not provided explicitly
+        parsed = urlparse(endpoint)
+        path = parsed.path or ""
+        inferred_deployment = None
+        if "/deployments/" in path:
+            # path example: /openai/deployments/gpt-4o-mini/chat/completions
+            parts = path.split("/")
+            try:
+                dep_idx = parts.index("deployments")
+                inferred_deployment = parts[dep_idx + 1]
+            except (ValueError, IndexError):
+                inferred_deployment = None
+
+        deployment_name = deployment or inferred_deployment
+        if not deployment_name:
+            raise ValueError("Azure configuration requires a deployment name (AZURE_OPENAI_DEPLOYMENT) or an endpoint containing '/deployments/<name>/'")
+
+        # Build api_base from scheme + netloc (strip any path and query)
+        api_base = f"{parsed.scheme}://{parsed.netloc}"
         openai.api_type = "azure"
-        openai.api_base = endpoint
-        # Use a common supported version; can be overridden via env if needed
-        openai.api_version = "2023-05-15"
+        openai.api_base = api_base
+        # prefer explicit OPENAI_API_VERSION env var, fallback to a sane default
+        openai.api_version = os.getenv("OPENAI_API_VERSION", "2023-05-15")
         openai.api_key = api_key
-        return {"deployment": deployment}
+        return {"deployment": deployment_name}
 
     # default: OpenAI
     if not api_key:
