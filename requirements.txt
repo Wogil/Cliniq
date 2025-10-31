@@ -9,3 +9,4 @@ scikit-learn
 azure-ai-projects
 azure-identity
 openai
+streamlit

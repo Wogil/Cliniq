@@ -10,48 +10,47 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def configure_openai(provider: str, api_key: Optional[str], endpoint: Optional[str], deployment: Optional[str]):
-    """Configure the openai client for either 'openai' or 'azure'.
-
-    For Azure OpenAI we set api_type, api_base and api_version and use the deployment name when calling chat completions.
+def configure_openai():
+    """Configure the openai client for Azure OpenAI using environment variables.
     """
-    if provider == "azure":
-        # Accept either: separate endpoint + deployment fields, or a full endpoint URL that contains the deployment path.
-        if not api_key or not endpoint:
-            raise ValueError("Azure configuration requires AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT")
+    endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    api_key = os.getenv("AZURE_OPENAI_API_KEY")
+    api_version = os.getenv("OPENAI_API_VERSION")
 
-        # Try to parse deployment from endpoint if not provided explicitly
-        parsed = urlparse(endpoint)
-        path = parsed.path or ""
-        inferred_deployment = None
-        if "/deployments/" in path:
-            # path example: /openai/deployments/gpt-4o-mini/chat/completions
-            parts = path.split("/")
-            try:
-                dep_idx = parts.index("deployments")
-                inferred_deployment = parts[dep_idx + 1]
-            except (ValueError, IndexError):
-                inferred_deployment = None
+    if not endpoint or not api_key:
+        raise ValueError("AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT environment variables are required")
 
-        deployment_name = deployment or inferred_deployment
-        if not deployment_name:
-            raise ValueError("Azure configuration requires a deployment name (AZURE_OPENAI_DEPLOYMENT) or an endpoint containing '/deployments/<name>/'")
+    # Parse the full endpoint URL to extract deployment and api version
+    parsed = urlparse(endpoint)
+    path = parsed.path or ""
+    
+    # Extract deployment name from path
+    if "/deployments/" not in path:
+        raise ValueError("AZURE_OPENAI_ENDPOINT must contain '/deployments/<name>/'")
+    
+    parts = [p for p in path.split("/") if p]
+    try:
+        dep_idx = parts.index("deployments")
+        deployment_name = parts[dep_idx + 1]
+    except (ValueError, IndexError):
+        raise ValueError("Could not parse deployment name from AZURE_OPENAI_ENDPOINT")
 
-        # Build api_base from scheme + netloc (strip any path and query)
-        api_base = f"{parsed.scheme}://{parsed.netloc}"
-        openai.api_type = "azure"
-        openai.api_base = api_base
-        # prefer explicit OPENAI_API_VERSION env var, fallback to a sane default
-        openai.api_version = os.getenv("OPENAI_API_VERSION", "2023-05-15")
-        openai.api_key = api_key
-        return {"deployment": deployment_name}
+    # Extract API version from query params if present
+    if parsed.query:
+        params = parse_qs(parsed.query)
+        if "api-version" in params:
+            api_version = params["api-version"][0]
 
-    # default: OpenAI
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY is required for OpenAI provider")
-    openai.api_type = "open_ai"
+    # Build api_base without the deployment path and query
+    api_base = f"{parsed.scheme}://{parsed.netloc}"
+    
+    # Configure OpenAI client
+    openai.api_type = "azure"
+    openai.api_base = api_base
+    openai.api_version = api_version
     openai.api_key = api_key
-    return {"model": deployment or "gpt-3.5-turbo"}
+    
+    return {"engine": deployment_name}  # Use engine instead of deployment for Azure
 
 
 def stream_completion(call_args):
@@ -59,7 +58,11 @@ def stream_completion(call_args):
 
     Yields text chunks as they arrive.
     """
-    for chunk in openai.ChatCompletion.create(stream=True, **call_args):
+    # Engine is already properly set in call_args from configure_openai()
+    for chunk in openai.ChatCompletion.create(
+        stream=True,
+        **call_args
+    ):
         # payload parsing depends on the library; each chunk may contain choices
         if "choices" in chunk:
             for choice in chunk["choices"]:
@@ -70,60 +73,42 @@ def stream_completion(call_args):
 
 
 def main():
-    st.set_page_config(page_title="Cliniq — OpenAI / Azure OpenAI Demo", layout="wide")
-    st.title("Cliniq — Streamlit interface for OpenAI & Azure OpenAI")
+    st.set_page_config(page_title="Cliniq — Chat Interface", layout="wide")
+    st.title("Cliniq — Chat Interface")
 
-    col1, col2 = st.columns([1, 2])
+    # Chat interface
+    st.header("Chat")
+    prompt = st.text_area("Prompt", height=200)
+    run = st.button("Send")
 
-    with col1:
-        st.header("Settings")
-        provider = st.selectbox("Provider", ["openai", "azure"], index=0)
+    if run:
+        try:
+            config = configure_openai()
+        except ValueError as e:
+            st.error(str(e))
+            return
 
-        if provider == "openai":
-            api_key = st.text_input("OpenAI API Key", value=os.getenv("OPENAI_API_KEY", ""), type="password")
-            endpoint = None
-            deployment = st.text_input("Model", value=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"))
-        else:
-            api_key = st.text_input("Azure OpenAI Key", value=os.getenv("AZURE_OPENAI_API_KEY", ""), type="password")
-            endpoint = st.text_input("Azure Endpoint (e.g. https://<your-resource>.openai.azure.com)", value=os.getenv("AZURE_OPENAI_ENDPOINT", ""))
-            deployment = st.text_input("Deployment Name", value=os.getenv("AZURE_OPENAI_DEPLOYMENT", ""))
+        call_args = {
+            **config,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7,  # Fixed temperature value
+        }
 
-        temperature = st.slider("Temperature", 0.0, 1.0, 0.5)
+        placeholder = st.empty()
+        full_text = ""
 
-    with col2:
-        st.header("Chat")
-        prompt = st.text_area("Prompt", height=200)
+        with placeholder.container():
+            st.markdown("**Assistant:**")
+            message_area = st.empty()
 
-        run = st.button("Send")
-
-        if run:
-            try:
-                config = configure_openai(provider, api_key, endpoint, deployment)
-            except ValueError as e:
-                st.error(str(e))
-                return
-
-            call_args = {
-                **config,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": float(temperature),
-            }
-
-            placeholder = st.empty()
-            full_text = ""
-
-            with placeholder.container():
-                st.markdown("**Assistant:**")
-                message_area = st.empty()
-
-            try:
-                for chunk in stream_completion(call_args):
-                    full_text += chunk
-                    # Throttle updates slightly for nicer UI
-                    message_area.markdown(full_text)
-                    time.sleep(0.02)
-            except Exception as e:
-                st.exception(e)
+        try:
+            for chunk in stream_completion(call_args):
+                full_text += chunk
+                # Throttle updates slightly for nicer UI
+                message_area.markdown(full_text)
+                time.sleep(0.02)
+        except Exception as e:
+            st.exception(e)
 
 
 if __name__ == "__main__":
