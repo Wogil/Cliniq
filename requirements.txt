@@ -8,5 +8,5 @@ python-dotenv
 scikit-learn
 azure-ai-projects
 azure-identity
-openai
+openai==0.28.0
 streamlit
